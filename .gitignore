@@ -1,0 +1,17 @@
+# Ignore large files and datasets
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.jpg
+*.png
+*.jpeg
+
+# Ignore training results
+runs/
+__pycache__/
+*.pt
+*.pth
+.DS_Store
+.env
+.venv/
