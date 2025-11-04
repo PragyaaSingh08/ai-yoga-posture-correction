@@ -1,5 +1,5 @@
 # =====================================================
-# train_pose_swin.py — Final Stable Version
+# train_pose_swin.py — Final Stable + Evaluation Version
 # Swin Transformer + Lightweight Classifier
 # Author: Pragya Singh
 # =====================================================
@@ -13,6 +13,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from tensorflow.keras.utils import to_categorical
 import cv2
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 # =====================================================
 # 1️⃣ Load CSV Dataset
@@ -123,16 +126,54 @@ model.summary()
 history = model.fit(
     X_train_embed, y_train,
     validation_data=(X_test_embed, y_test),
-    epochs=20,
+    epochs=60,
     batch_size=16,
     verbose=1
 )
 
 # =====================================================
-# 7️⃣ Save Model
+# 7️⃣ Evaluation Metrics
+# =====================================================
+train_loss, train_acc = model.evaluate(X_train_embed, y_train, verbose=0)
+test_loss, test_acc = model.evaluate(X_test_embed, y_test, verbose=0)
+
+print("\n================== 📈 Model Performance ==================")
+print(f"🏋️‍♀️ Training Accuracy: {train_acc:.4f}")
+print(f"🧪 Test Accuracy: {test_acc:.4f}")
+print("==========================================================\n")
+
+# --- Classification Metrics ---
+y_pred_probs = model.predict(X_test_embed)
+y_pred = np.argmax(y_pred_probs, axis=1)
+y_true = np.argmax(y_test, axis=1)
+
+print("📊 Classification Report:")
+report = classification_report(y_true, y_pred, target_names=le.classes_)
+print(report)
+
+# --- Confusion Matrix ---
+cm = confusion_matrix(y_true, y_pred)
+plt.figure(figsize=(7, 5))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Purples',
+            xticklabels=le.classes_,
+            yticklabels=le.classes_)
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.title("🌀 Confusion Matrix — Swin Pose Classification")
+plt.tight_layout()
+
+# Save confusion matrix figure
+cm_path = "outputs/confusion_matrix_swin.png"
+plt.savefig(cm_path)
+plt.show()
+print(f"📁 Confusion matrix saved at: {cm_path}")
+
+# =====================================================
+# 8️⃣ Save Model
 # =====================================================
 os.makedirs("outputs", exist_ok=True)
 MODEL_PATH = "outputs/pose_swin_model_final.h5"
 model.save(MODEL_PATH)
-print(f"✅ Model saved at: {MODEL_PATH}")
-print("🎉 Training complete successfully!")
+
+print(f"\n✅ Model saved at: {MODEL_PATH}")
+print("🎉 Training & Evaluation complete successfully!")

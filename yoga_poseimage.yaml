@@ -1,0 +1,12 @@
+# YOLOv12 Classification Dataset Config
+
+path: C:/Users/DR. Sindhu Sagar/Desktop/(79) WhatsApp_files/yoga posture/dataset
+train: train
+val: val
+test: test
+
+names:
+  0: cobra_pose
+  1: downward_dog
+  2: tree_pose
+  3: warrior_pose

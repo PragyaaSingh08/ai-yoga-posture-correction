@@ -1,43 +1,67 @@
-import albumentations as A
-import cv2
+import pandas as pd
+import numpy as np
 import os
-from tqdm import tqdm
 
-input_folder = "dataset"
-output_folder = "augmented"
-num_augmented_per_image = 5
+# === 1️⃣ Load original data ===
+INPUT_FILE = "outputs/angles_pose_keypoints.csv"
+OUTPUT_FILE = "outputs/augmented_angles.csv"
 
-transform = A.Compose([
-    A.RandomRotate90(p=0.5),
-    A.Flip(p=0.5),
-    A.Transpose(p=0.3),
-    A.RandomBrightnessContrast(p=0.5),
-    A.HueSaturationValue(p=0.3),
-    A.GaussNoise(p=0.3),
-    A.MotionBlur(p=0.2),
-    A.RandomResizedCrop(height=224, width=224, scale=(0.8, 1.0), p=0.4),
-])
+if not os.path.exists(INPUT_FILE):
+    raise FileNotFoundError(f"❌ File not found: {INPUT_FILE}")
 
-for root, dirs, files in os.walk(input_folder):
-    for img_name in tqdm(files, desc=f"Augmenting in {os.path.basename(root)}"):
-        if not img_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-            continue
+df = pd.read_csv(INPUT_FILE)
+print(f"✅ Loaded: {INPUT_FILE}")
+print(f"Columns: {df.columns.tolist()}")
 
-        img_path = os.path.join(root, img_name)
-        img = cv2.imread(img_path)
-        if img is None:
-            continue
+# === 2️⃣ Separate features and labels ===
+# Drop non-numeric columns (like 'pose', 'frame')
+features = df.drop(["pose", "frame"], axis=1)
+labels = df["pose"]
 
-        # Create matching output subfolder
-        relative_path = os.path.relpath(root, input_folder)
-        output_subfolder = os.path.join(output_folder, relative_path)
-        os.makedirs(output_subfolder, exist_ok=True)
+# === 3️⃣ Define augmentation functions ===
+def add_noise(X, noise_level=0.05):
+    noise = np.random.normal(0, noise_level, X.shape)
+    return X + noise
 
-        for i in range(num_augmented_per_image):
-            augmented = transform(image=img)
-            aug_img = augmented['image']
-            base_name = os.path.splitext(img_name)[0]
-            aug_name = f"{base_name}_aug_{i+1}.jpg"
-            cv2.imwrite(os.path.join(output_subfolder, aug_name), aug_img)
+def scale(X, scale_range=(0.9, 1.1)):
+    factor = np.random.uniform(scale_range[0], scale_range[1])
+    return X * factor
 
-print("\n✅ All augmented images saved inside 'augmented/' with the same folder structure.")
+def rotate(X, angle_range=(-5, 5)):
+    # simulate slight angular deviation (small rotations)
+    angle = np.random.uniform(angle_range[0], angle_range[1])
+    radians = np.deg2rad(angle)
+    return X * np.cos(radians)
+
+# === 4️⃣ Apply augmentations ===
+augmented_data = []
+
+for i in range(len(features)):
+    original = features.iloc[i].values
+
+    # random choice of augmentation type
+    aug_type = np.random.choice(["noise", "scale", "rotate"])
+
+    if aug_type == "noise":
+        new_sample = add_noise(original)
+    elif aug_type == "scale":
+        new_sample = scale(original)
+    else:
+        new_sample = rotate(original)
+
+    augmented_data.append(new_sample)
+
+# Convert to DataFrame
+aug_df = pd.DataFrame(augmented_data, columns=features.columns)
+aug_df["pose"] = labels.values  # keep same labels
+
+# Combine with original data
+final_df = pd.concat([df, aug_df], ignore_index=True)
+
+# === 5️⃣ Save the augmented dataset ===
+os.makedirs("outputs", exist_ok=True)
+final_df.to_csv(OUTPUT_FILE, index=False)
+
+print(f"✅ Data augmentation complete!")
+print(f"Original samples: {len(df)} → Augmented: {len(final_df)}")
+print(f"📁 Saved: {OUTPUT_FILE}")

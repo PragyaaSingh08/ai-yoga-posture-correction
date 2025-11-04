@@ -1,110 +1,110 @@
 # =========================================
 # build_dataset.py
-# Create full dataset of angles + labels from all augmented yoga images/videos
+# Build full training dataset from yoga images/videos
+# Extracts YOLO keypoints + computed joint angles
 # =========================================
 
 import os
 import cv2
-import numpy as np
+import glob
 import pandas as pd
-from ultralytics import YOLO
+import numpy as np
 from tqdm import tqdm
+from ultralytics import YOLO
 
 # -----------------------------
-# Paths (updated)
+# 1️⃣ Configuration
 # -----------------------------
-DATASET_DIR = "augmented_dataset"   # 👈 use augmented dataset instead of raw
+DATASET_DIR = "dataset"          # Folder with yoga videos/images (organize by posture/label if possible)
 OUTPUT_DIR = "outputs"
+MODEL_PATH = "yolov8n-pose.pt"   # Lightweight YOLOv8 pose model
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Load YOLOv8 pose model (lightweight version)
-model = YOLO("yolov8n-pose.pt")
+# Load YOLOv8 pose model
+model = YOLO(MODEL_PATH)
 
 # -----------------------------
-# Angle computation
+# 2️⃣ Helper: Compute joint angle
 # -----------------------------
 def compute_angle(A, B, C):
     BA = A - B
     BC = C - B
-    cos_angle = np.dot(BA, BC) / (np.linalg.norm(BA)*np.linalg.norm(BC) + 1e-8)
+    cos_angle = np.dot(BA, BC) / (np.linalg.norm(BA) * np.linalg.norm(BC) + 1e-8)
     return np.degrees(np.arccos(np.clip(cos_angle, -1, 1)))
 
-def process_frame(keypoints):
-    """Compute 6 angles from a set of 17 keypoints"""
-    points = np.array(keypoints).reshape(-1, 2)
-    try:
-        left_knee = compute_angle(points[11], points[13], points[15])
-        right_knee = compute_angle(points[12], points[14], points[16])
-        left_elbow = compute_angle(points[5], points[7], points[9])
-        right_elbow = compute_angle(points[6], points[8], points[10])
-        left_shoulder = compute_angle(points[7], points[5], points[11])
-        right_shoulder = compute_angle(points[8], points[6], points[12])
-    except IndexError:
-        return None
-    return [left_knee, right_knee, left_elbow, right_elbow, left_shoulder, right_shoulder]
+# -----------------------------
+# 3️⃣ Collect dataset files
+# -----------------------------
+file_types = ("*.mp4", "*.avi", "*.mov", "*.jpg", "*.jpeg", "*.png")
+dataset_files = []
+for ext in file_types:
+    dataset_files.extend(glob.glob(os.path.join(DATASET_DIR, "**", ext), recursive=True))
 
-def process_file(filepath, label):
-    """Process a single image or video file"""
-    ext = filepath.lower().split('.')[-1]
-    data_rows = []
+if not dataset_files:
+    raise FileNotFoundError("❌ No images or videos found in 'dataset/' folder.")
 
-    if ext in ['jpg', 'jpeg', 'png']:
-        img = cv2.imread(filepath)
-        if img is None:
-            return []
-        results = model(img, verbose=False)
-        for r in results:
-            if r.keypoints is not None and len(r.keypoints.xy) > 0:
-                keypoints = r.keypoints.xy[0].cpu().numpy().flatten()
-                angles = process_frame(keypoints)
-                if angles:
-                    data_rows.append(angles + [label])
+print(f"📂 Found {len(dataset_files)} files for dataset building")
 
-    elif ext in ['mp4', 'mov', 'avi']:
-        cap = cv2.VideoCapture(filepath)
-        while cap.isOpened():
+# -----------------------------
+# 4️⃣ Process each file
+# -----------------------------
+all_rows = []
+
+for file_path in tqdm(dataset_files, desc="Extracting keypoints and angles"):
+    label = os.path.basename(os.path.dirname(file_path))  # Folder name = posture label
+
+    # Load frames depending on type
+    if file_path.lower().endswith((".jpg", ".jpeg", ".png")):
+        frames = [cv2.imread(file_path)]
+    else:
+        cap = cv2.VideoCapture(file_path)
+        frames = []
+        while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            results = model(frame, verbose=False)
-            for r in results:
-                if r.keypoints is not None and len(r.keypoints.xy) > 0:
-                    keypoints = r.keypoints.xy[0].cpu().numpy().flatten()
-                    angles = process_frame(keypoints)
-                    if angles:
-                        data_rows.append(angles + [label])
+            frames.append(frame)
         cap.release()
 
-    return data_rows
+    # Process frames with YOLO
+    for frame in frames[::5]:  # every 5th frame for efficiency
+        results = model(frame, verbose=False)
+        if not results or len(results[0].keypoints.xy) == 0:
+            continue
 
+        keypoints = results[0].keypoints.xy[0].cpu().numpy()  # (17, 2)
+        if keypoints.shape[0] < 17:
+            continue
+
+        # Compute angles
+        try:
+            left_knee = compute_angle(keypoints[11], keypoints[13], keypoints[15])
+            right_knee = compute_angle(keypoints[12], keypoints[14], keypoints[16])
+            left_elbow = compute_angle(keypoints[5], keypoints[7], keypoints[9])
+            right_elbow = compute_angle(keypoints[6], keypoints[8], keypoints[10])
+            left_shoulder = compute_angle(keypoints[7], keypoints[5], keypoints[11])
+            right_shoulder = compute_angle(keypoints[8], keypoints[6], keypoints[12])
+        except Exception:
+            continue
+
+        all_rows.append({
+            "file": os.path.basename(file_path),
+            "label": label,
+            "left_knee": left_knee,
+            "right_knee": right_knee,
+            "left_elbow": left_elbow,
+            "right_elbow": right_elbow,
+            "left_shoulder": left_shoulder,
+            "right_shoulder": right_shoulder
+        })
 
 # -----------------------------
-# Process all files
+# 5️⃣ Save dataset
 # -----------------------------
-all_files = []
-for label in ["correct", "incorrect"]:
-    folder = os.path.join(DATASET_DIR, label)
-    if os.path.exists(folder):
-        for f in os.listdir(folder):
-            if f.lower().endswith(('.mp4', '.mov', '.avi', '.jpg', '.jpeg', '.png')):
-                all_files.append((os.path.join(folder, f), label))
-
-print(f"🧘 Processing {len(all_files)} files from '{DATASET_DIR}' ...")
-
-all_data = []
-for filepath, label in tqdm(all_files, desc="Extracting Angles"):
-    data_rows = process_file(filepath, label)
-    all_data.extend(data_rows)
-
-# -----------------------------
-# Save dataset
-# -----------------------------
-columns = ['left_knee', 'right_knee', 'left_elbow', 'right_elbow', 'left_shoulder', 'right_shoulder', 'label']
-df = pd.DataFrame(all_data, columns=columns)
-
-dataset_csv = os.path.join(OUTPUT_DIR, "full_dataset_angles.csv")
-df.to_csv(dataset_csv, index=False)
-
-print(f"\n✅ Yoga angle dataset built successfully!")
-print(f"✅ Total samples: {len(df)}")
-print(f"📁 Saved at: {dataset_csv}")
+df = pd.DataFrame(all_rows)
+output_csv = os.path.join(OUTPUT_DIR, "full_dataset_angles.csv")
+df.to_csv(output_csv, index=False)
+print(f"\n✅ Dataset built successfully!")
+print(f"📄 Saved at: {output_csv}")
+print(f"🧩 Total samples: {len(df)}")
+print(f"📊 Labels found: {df['label'].unique().tolist()}")

@@ -1,0 +1,12 @@
+path: ./  # base dataset directory
+train: train
+val: val
+test: test
+
+# class names (replace with actual yoga poses)
+names:
+  0: warrior
+  1: tree
+  2: cobra
+  3: downward_dog
+  4: mountain
