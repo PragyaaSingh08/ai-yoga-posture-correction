@@ -1,177 +1,154 @@
 # =====================================================
-# train_pose_vit_fast.py — Yoga Pose Classification using Vision Transformer (ViT)
+# train_pose_resnet.py ✅ Stable TensorFlow Version
 # =====================================================
 
 import os
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 import matplotlib.pyplot as plt
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Dense, Dropout
-from tensorflow.keras.utils import to_categorical
-
-# =====================================================
-# ✅ Mixed Precision + XLA Optimization for Speed
-# =====================================================
-from tensorflow.keras import mixed_precision
-mixed_precision.set_global_policy('mixed_float16')
-tf.config.optimizer.set_jit(True)  # XLA enabled
+import tensorflow as tf
 
 # =====================================================
 # 1️⃣ Load Dataset
 # =====================================================
-CSV_PATH = "outputs/angles_pose_keypoints.csv"
+CSV_PATH = "outputs/pose_keypoints.csv"  # or "augmented_angles.csv" if using angle features
 if not os.path.exists(CSV_PATH):
-    raise FileNotFoundError(f"❌ CSV not found at {CSV_PATH}")
+    raise FileNotFoundError(f"❌ File not found: {CSV_PATH}")
 
 df = pd.read_csv(CSV_PATH)
 print(f"✅ Loaded dataset with {len(df)} samples")
 
-# =====================================================
-# 2️⃣ Feature & Label Setup
-# =====================================================
-feature_cols = ['left_knee', 'right_knee', 'left_elbow',
-                'right_elbow', 'left_shoulder', 'right_shoulder']
-X = df[feature_cols].values.astype("float32")
-y = df['pose'].values
+# Features & labels
+X = df.drop(["pose", "frame"], axis=1, errors="ignore").values.astype("float32")
+y = df["pose"].values
 
 # Encode labels
 le = LabelEncoder()
-y = le.fit_transform(y)
-y = to_categorical(y)
+y_encoded = le.fit_transform(y)
+num_classes = len(le.classes_)
 print(f"🎯 Classes: {list(le.classes_)}")
 
-# Train-test split
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42)
+# =====================================================
+# 2️⃣ Convert Keypoints to Pseudo-Images
+# =====================================================
+def keypoints_to_image(sample):
+    # Reshape flat keypoints to (17, 2) if 34 features exist
+    if sample.shape[0] == 34:
+        sample = sample.reshape(17, 2)
+    img = np.zeros((96, 96, 3), dtype=np.float32)
+    x = np.clip((sample[:, 0] / np.max(sample[:, 0] + 1e-6)) * 95, 0, 95).astype(int)
+    y = np.clip((sample[:, 1] / np.max(sample[:, 1] + 1e-6)) * 95, 0, 95).astype(int)
+    for i in range(len(x)):
+        img[y[i], x[i]] = [1.0, 1.0, 1.0]  # white point
+    img = cv2.GaussianBlur(img, (5, 5), 0)
+    return img
+
+import cv2
+X_imgs = np.array([keypoints_to_image(x) for x in X])
+print(f"✅ Converted to pseudo-images: {X_imgs.shape}")
+
+# =====================================================
+# 3️⃣ Train-Test Split
+# =====================================================
+sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+for train_idx, test_idx in sss.split(X_imgs, y_encoded):
+    X_train, X_test = X_imgs[train_idx], X_imgs[test_idx]
+    y_train, y_test = y_encoded[train_idx], y_encoded[test_idx]
+
+y_train_cat = tf.keras.utils.to_categorical(y_train, num_classes)
+y_test_cat = tf.keras.utils.to_categorical(y_test, num_classes)
 print(f"📊 Train shape: {X_train.shape}, Test shape: {X_test.shape}")
 
 # =====================================================
-# 3️⃣ Convert feature vectors → pseudo-images
+# 4️⃣ Define CNN Backbone (ResNet50 or MobileNetV3)
 # =====================================================
-def to_pseudo_images(X, image_size=(96, 96, 3)):
-    n = X.shape[0]
-    pseudo = np.repeat(X[:, None, None, :], image_size[0], axis=1)
-    pseudo = np.repeat(pseudo, image_size[1], axis=2)
-    pseudo = pseudo[:, :, :, :3]
-    pseudo = np.clip(pseudo / np.max(pseudo), 0, 1)
-    return pseudo.astype("float32")
-
-X_train_img = to_pseudo_images(X_train)
-X_test_img = to_pseudo_images(X_test)
-print(f"✅ Converted to pseudo-images: {X_train_img.shape}")
-
-# =====================================================
-# 4️⃣ tf.data Pipeline (faster loading)
-# =====================================================
-BATCH_SIZE = 32
-train_ds = tf.data.Dataset.from_tensor_slices((X_train_img, y_train)).shuffle(512).batch(BATCH_SIZE).cache().prefetch(tf.data.AUTOTUNE)
-test_ds = tf.data.Dataset.from_tensor_slices((X_test_img, y_test)).batch(BATCH_SIZE).cache().prefetch(tf.data.AUTOTUNE)
-
-# =====================================================
-# 5️⃣ Vision Transformer (ViT-B16)
-# =====================================================
-print("🔄 Loading Vision Transformer (ViT-B16)...")
-
-vit_model = tf.keras.applications.ViT_B16(
+print("🔄 Loading ResNet50 backbone...")
+base_model = tf.keras.applications.ResNet50(
     include_top=False,
-    pooling='avg',
+    weights='imagenet',
     input_shape=(96, 96, 3),
-    weights='imagenet'
+    pooling='avg'
 )
 
-print("✅ Loaded ViT-B16 Backbone")
+# 👇 To use MobileNetV3 instead, comment above & uncomment below
+# base_model = tf.keras.applications.MobileNetV3Small(
+#     include_top=False,
+#     weights='imagenet',
+#     input_shape=(96, 96, 3),
+#     pooling='avg'
+# )
+
+# Freeze base model
+base_model.trainable = False
 
 # =====================================================
-# 6️⃣ Build Model
+# 5️⃣ Add Classification Head
 # =====================================================
-inputs = tf.keras.Input(shape=(96, 96, 3))
-x = vit_model(inputs, training=False)
-x = Dense(256, activation='relu')(x)
-x = Dropout(0.3)(x)
-outputs = Dense(y.shape[1], activation='softmax', dtype='float32')(x)
+x = base_model.output
+x = tf.keras.layers.Dense(256, activation='relu')(x)
+x = tf.keras.layers.Dropout(0.3)(x)
+output = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
 
-model = Model(inputs, outputs)
+model = tf.keras.Model(inputs=base_model.input, outputs=output)
 model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 model.summary()
 
 # =====================================================
-# 7️⃣ Train Model
+# 6️⃣ Train the Model
 # =====================================================
-EPOCHS = 60
+EPOCHS = 30
+BATCH_SIZE = 16
 
 history = model.fit(
-    train_ds,
-    validation_data=test_ds,
+    X_train, y_train_cat,
+    validation_data=(X_test, y_test_cat),
     epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
     verbose=1
 )
 
 # =====================================================
-# 8️⃣ Evaluate Model
+# 7️⃣ Evaluate Model
 # =====================================================
-train_loss, train_acc = model.evaluate(train_ds, verbose=0)
-test_loss, test_acc = model.evaluate(test_ds, verbose=0)
+train_loss, train_acc = model.evaluate(X_train, y_train_cat, verbose=0)
+test_loss, test_acc = model.evaluate(X_test, y_test_cat, verbose=0)
 
 print("\n================== 📈 Model Performance ==================")
 print(f"🏋️‍♀️ Training Accuracy: {train_acc:.4f}")
 print(f"🧪 Test Accuracy: {test_acc:.4f}")
-print(f"⚙️  Backbone Used: Vision Transformer (ViT-B16, 96x96 input)")
 print("==========================================================\n")
 
 # =====================================================
-# 9️⃣ Accuracy/Loss Graphs
+# 8️⃣ Confusion Matrix & Report
 # =====================================================
-plt.figure(figsize=(12, 5))
-plt.subplot(1, 2, 1)
-plt.plot(history.history['accuracy'], label='Train')
-plt.plot(history.history['val_accuracy'], label='Val', linestyle='--')
-plt.title('📊 Accuracy over Epochs')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.legend()
-
-plt.subplot(1, 2, 2)
-plt.plot(history.history['loss'], label='Train')
-plt.plot(history.history['val_loss'], label='Val', linestyle='--')
-plt.title('📉 Loss over Epochs')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-plt.tight_layout()
-plt.show()
-
-# =====================================================
-# 🔟 Classification Report & Confusion Matrix
-# =====================================================
-y_pred_probs = model.predict(test_ds)
+y_pred_probs = model.predict(X_test)
 y_pred = np.argmax(y_pred_probs, axis=1)
-y_true = np.argmax(y_test, axis=1)
 
 print("📊 Classification Report:")
-print(classification_report(y_true, y_pred, target_names=le.classes_))
+print(classification_report(y_test, y_pred, target_names=le.classes_))
 
-cm = confusion_matrix(y_true, y_pred)
+cm = confusion_matrix(y_test, y_pred)
 plt.figure(figsize=(7, 5))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-            xticklabels=le.classes_, yticklabels=le.classes_)
-plt.xlabel("Predicted")
-plt.ylabel("True")
-plt.title("⚡ Confusion Matrix — Yoga Pose Classification (ViT-B16)")
+            xticklabels=le.classes_,
+            yticklabels=le.classes_)
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.title("🌀 Confusion Matrix - ResNet50 Yoga Pose Classification")
 plt.tight_layout()
 plt.show()
 
 # =====================================================
-# 1️⃣1️⃣ Save Model
+# 9️⃣ Save Model
 # =====================================================
-MODEL_DIR = "outputs"
+MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
-MODEL_PATH = os.path.join(MODEL_DIR, "pose_vit_fast.h5")
+MODEL_PATH = os.path.join(MODEL_DIR, "resnet50_yoga_pose.h5")
 model.save(MODEL_PATH)
+
 print(f"\n✅ Model saved at: {MODEL_PATH}")
-print("✅ ViT Training Complete ⚡")
+print("✅ Training complete and evaluated successfully!")

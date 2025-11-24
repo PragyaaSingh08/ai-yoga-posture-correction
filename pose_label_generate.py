@@ -1,44 +1,118 @@
-# =========================================
-# pose_label_generate.py (light version)
-# =========================================
+# ============================================================
+# generate_pose_angles.py ✅ Converts keypoints → joint angles
+# ============================================================
 
 import os
-import cv2
-from ultralytics import YOLO
 import pandas as pd
-from tqdm import tqdm
+import numpy as np
+import math
 
-FRAMES_DIR = "frames_dataset"
-OUTPUT_DIR = "outputs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Input and output paths
+INPUT_CSV = "outputs/pose_keypoints.csv"
+OUTPUT_CSV = "outputs/augmented_angles.csv"
 
-model = YOLO("yolov8n-pose.pt")  # Lightweight model
+if not os.path.exists(INPUT_CSV):
+    raise FileNotFoundError(f"❌ Keypoints file not found: {INPUT_CSV}")
 
-data = []
-max_frames = 15  # ✅ Limit frames per pose
+print(f"📂 Loading keypoints from: {INPUT_CSV}")
+df = pd.read_csv(INPUT_CSV)
 
-for folder in tqdm(sorted(os.listdir(FRAMES_DIR))):
-    folder_path = os.path.join(FRAMES_DIR, folder)
-    if not os.path.isdir(folder_path):
+# ------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------
+def calculate_angle(a, b, c):
+    """Calculate the angle (in degrees) between points a, b, c."""
+    a, b, c = np.array(a), np.array(b), np.array(c)
+    ba = a - b
+    bc = c - b
+
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-8)
+    angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
+    return np.degrees(angle)
+
+def get_point(row, i):
+    """Return (x, y) for a specific keypoint index."""
+    return (row[f"x{i}"], row[f"y{i}"])
+
+# ------------------------------------------------------------
+# Keypoint index reference (for MoveNet/YOLOv8-Pose)
+# ------------------------------------------------------------
+# 0: nose
+# 1: left_eye
+# 2: right_eye
+# 3: left_ear
+# 4: right_ear
+# 5: left_shoulder
+# 6: right_shoulder
+# 7: left_elbow
+# 8: right_elbow
+# 9: left_wrist
+# 10: right_wrist
+# 11: left_hip
+# 12: right_hip
+# 13: left_knee
+# 14: right_knee
+# 15: left_ankle
+# 16: right_ankle
+
+# ------------------------------------------------------------
+# Compute angles
+# ------------------------------------------------------------
+angle_data = []
+
+for _, row in df.iterrows():
+    try:
+        angles = {}
+
+        # Shoulder-Elbow-Wrist
+        angles["left_elbow_angle"] = calculate_angle(get_point(row, 5), get_point(row, 7), get_point(row, 9))
+        angles["right_elbow_angle"] = calculate_angle(get_point(row, 6), get_point(row, 8), get_point(row, 10))
+
+        # Hip-Knee-Ankle
+        angles["left_knee_angle"] = calculate_angle(get_point(row, 11), get_point(row, 13), get_point(row, 15))
+        angles["right_knee_angle"] = calculate_angle(get_point(row, 12), get_point(row, 14), get_point(row, 16))
+
+        # Shoulder-Hip-Knee
+        angles["left_hip_angle"] = calculate_angle(get_point(row, 5), get_point(row, 11), get_point(row, 13))
+        angles["right_hip_angle"] = calculate_angle(get_point(row, 6), get_point(row, 12), get_point(row, 14))
+
+        # Optional: torso and arm-leg combined angles
+        angles["shoulder_angle"] = calculate_angle(get_point(row, 5), get_point(row, 6), get_point(row, 12))
+        angles["hip_angle"] = calculate_angle(get_point(row, 11), get_point(row, 12), get_point(row, 6))
+
+        # Pose and frame metadata
+        angles["pose"] = row["pose"]
+        angles["frame"] = row["frame"]
+
+        angle_data.append(angles)
+
+    except Exception as e:
+        print(f"⚠️ Skipped one row due to error: {e}")
         continue
 
-    label = folder.split("_")[-1]  # e.g. Bhujangasana
-    frame_files = sorted(os.listdir(folder_path))[:max_frames]  # limit frames
+# ------------------------------------------------------------
+# Convert to DataFrame
+# ------------------------------------------------------------
+angle_df = pd.DataFrame(angle_data)
+print(f"✅ Computed {len(angle_df)} valid rows of angles")
 
-    for frame_name in frame_files:
-        frame_path = os.path.join(folder_path, frame_name)
-        try:
-            results = model(frame_path, verbose=False)[0]
-            keypoints = results.keypoints.xy.cpu().numpy()[0]  # shape (17,2)
-            frame_data = {"pose": label, "frame": frame_name}
-            for i, (x, y) in enumerate(keypoints):
-                frame_data[f"x{i}"] = x
-                frame_data[f"y{i}"] = y
-            data.append(frame_data)
-        except Exception as e:
-            print(f"⚠️ Error with {frame_name}: {e}")
+# ------------------------------------------------------------
+# Data augmentation (optional — adds small random noise)
+# ------------------------------------------------------------
+augmented_df = angle_df.copy()
+noise_level = 2.0  # degrees
+numeric_cols = [c for c in angle_df.columns if c not in ["pose", "frame"]]
 
-df = pd.DataFrame(data)
-csv_path = os.path.join(OUTPUT_DIR, "pose_keypoints.csv")
-df.to_csv(csv_path, index=False)
-print(f"✅ Keypoints saved at {csv_path}")
+for _ in range(3):  # create 3x more data
+    noisy = angle_df.copy()
+    noisy[numeric_cols] += np.random.normal(0, noise_level, size=noisy[numeric_cols].shape)
+    augmented_df = pd.concat([augmented_df, noisy], ignore_index=True)
+
+print(f"📈 After augmentation: {len(augmented_df)} samples")
+
+# ------------------------------------------------------------
+# Save output CSV
+# ------------------------------------------------------------
+os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
+augmented_df.to_csv(OUTPUT_CSV, index=False)
+print(f"✅ Angles + Augmented data saved at: {OUTPUT_CSV}")
